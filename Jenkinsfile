@@ -11,37 +11,42 @@ pipeline {
         DORA_LOG = '/var/lib/jenkins/dora-metrics/deployments.csv'
         DORA_WINDOW_DAYS = '30'
         SEMGREP_BIN = '/var/lib/jenkins/semgrep-venv/bin/semgrep'
-        SEMGREP_STATUS = 'UNKNOWN'
     }
 
     stages {
+
+        stage('Checkout') {
+            steps {
+                checkout scm
+            }
+        }
+
         stage('Capture Source Info') {
             steps {
                 script {
                     env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     env.GIT_COMMIT_EPOCH = sh(script: "git log -1 --format=%ct", returnStdout: true).trim()
-                    env.GIT_COMMIT_ISO = sh(script: "git log -1 --format=%cI", returnStdout: true).trim()
+
+                    // FIX: pakai integer dari shell (anti error desimal)
+                    env.PIPELINE_START_EPOCH = sh(script: "date +%s", returnStdout: true).trim()
 
                     echo "Commit: ${env.GIT_COMMIT_SHORT}"
-                    echo "Commit time: ${env.GIT_COMMIT_ISO}"
+                    echo "Commit epoch: ${env.GIT_COMMIT_EPOCH}"
+                    echo "Pipeline start: ${env.PIPELINE_START_EPOCH}"
                 }
             }
         }
 
         stage('Prepare Workspace') {
             steps {
-                sh '''
-                    rm -rf build semgrep-report.json dora-metrics.json semgrep-status.txt
-                '''
+                sh 'rm -rf build semgrep-report.json dora-metrics.json semgrep-status.txt'
             }
         }
 
         stage('Semgrep Analysis') {
             steps {
                 script {
-                    sh '''
-                        test -x "$SEMGREP_BIN"
-                    '''
+                    sh 'test -x "$SEMGREP_BIN"'
 
                     def semgrepExit = sh(
                         returnStatus: true,
@@ -51,11 +56,11 @@ pipeline {
                             exit_code=$?
 
                             if [ $exit_code -eq 0 ]; then
-                                echo OK > semgrep-status.txt
+                                echo "OK" > semgrep-status.txt
                             elif [ $exit_code -eq 1 ]; then
-                                echo ISSUES > semgrep-status.txt
+                                echo "ISSUES" > semgrep-status.txt
                             else
-                                echo FAILED > semgrep-status.txt
+                                echo "FAILED" > semgrep-status.txt
                             fi
 
                             exit $exit_code
@@ -75,26 +80,26 @@ pipeline {
         }
 
         stage('Build') {
-    steps {
-        echo "Build static web (generic)"
+            steps {
+                echo "Build static web"
+                sh '''
+                    set -e
+                    rm -rf build
+                    mkdir -p build
 
-        sh '''
-            set -e
-            rm -rf build
-            mkdir -p build
+                    for f in index.html templates.html templatemo-quantix-style.css templatemo-quantix-script.js; do
+                        if [ -f "$f" ]; then cp "$f" build/; fi
+                    done
 
-            # copy semua file & folder kecuali hidden dan build itu sendiri
-            for item in *; do
-                if [ "$item" != "build" ]; then
-                    cp -r "$item" build/
-                fi
-            done
-        '''
-    }
-}
+                    for d in assets images img css js fonts vendor; do
+                        if [ -d "$d" ]; then cp -r "$d" build/; fi
+                    done
+                '''
+            }
+        }
+
         stage('Deploy to Nginx') {
             steps {
-                echo "Deploy ke Nginx"
                 sh '''
                     mkdir -p "$APP_DIR"
                     rm -rf "$APP_DIR"/*
@@ -108,66 +113,82 @@ pipeline {
                 script {
                     def result = sh(
                         returnStdout: true,
-                        script: '''
+                        script: """
                             set -e
 
-                            DEPLOY_EPOCH=$(date +%s)
-                            LT_SECONDS=$((DEPLOY_EPOCH - GIT_COMMIT_EPOCH))
-                            LT_MINUTES=$(awk -v s="$LT_SECONDS" 'BEGIN { printf "%.2f", s/60 }')
-                            WINDOW_START=$(date -d "$DORA_WINDOW_DAYS days ago" +%s)
+                            DEPLOY_EPOCH=\$(date +%s)
 
-                            mkdir -p "$(dirname "$DORA_LOG")"
+                            # =========================
+                            # LT DORA (Commit → Deploy)
+                            # =========================
+                            LT_DORA=\$((DEPLOY_EPOCH - ${env.GIT_COMMIT_EPOCH}))
 
-                            if [ ! -f "$DORA_LOG" ]; then
-                                echo "build_number,commit,commit_epoch,deploy_epoch,lt_seconds,status,semgrep_status" > "$DORA_LOG"
+                            # =========================
+                            # LT PIPELINE (Stopwatch)
+                            # =========================
+                            LT_PIPE=\$((DEPLOY_EPOCH - ${env.PIPELINE_START_EPOCH}))
+
+                            LT_DORA_MIN=\$(awk -v s="\$LT_DORA" 'BEGIN { printf "%.2f", s/60 }')
+                            LT_PIPE_MIN=\$(awk -v s="\$LT_PIPE" 'BEGIN { printf "%.2f", s/60 }')
+
+                            WINDOW_START=\$(date -d "${env.DORA_WINDOW_DAYS} days ago" +%s)
+
+                            mkdir -p "\$(dirname "${env.DORA_LOG}")"
+
+                            if [ ! -f "${env.DORA_LOG}" ]; then
+                                echo "build,commit,commit_epoch,deploy_epoch,lt_dora,lt_pipeline,status,semgrep" > "${env.DORA_LOG}"
                             fi
 
-                            if [ "$SEMGREP_STATUS" = "OK" ]; then
-                                DEPLOY_STATUS="SUCCESS"
+                            if [ "${env.SEMGREP_STATUS}" = "OK" ]; then
+                                STATUS="SUCCESS"
                             else
-                                DEPLOY_STATUS="SUCCESS_WITH_ISSUES"
+                                STATUS="SUCCESS_WITH_ISSUES"
                             fi
 
-                            printf '%s,%s,%s,%s,%s,%s,%s\n' \
-                                "$BUILD_NUMBER" \
-                                "$GIT_COMMIT_SHORT" \
-                                "$GIT_COMMIT_EPOCH" \
-                                "$DEPLOY_EPOCH" \
-                                "$LT_SECONDS" \
-                                "$DEPLOY_STATUS" \
-                                "$SEMGREP_STATUS" >> "$DORA_LOG"
+                            printf '%s,%s,%s,%s,%s,%s,%s,%s\\n' \\
+                                "${env.BUILD_NUMBER}" \\
+                                "${env.GIT_COMMIT_SHORT}" \\
+                                "${env.GIT_COMMIT_EPOCH}" \\
+                                "\$DEPLOY_EPOCH" \\
+                                "\$LT_DORA" \\
+                                "\$LT_PIPE" \\
+                                "\$STATUS" \\
+                                "${env.SEMGREP_STATUS}" >> "${env.DORA_LOG}"
 
-                            DEPLOY_COUNT=$(awk -F',' -v ws="$WINDOW_START" '
-                                NR > 1 && $4 >= ws && $6 ~ /^SUCCESS/ { c++ }
+                            DEPLOY_COUNT=\$(awk -F',' -v ws="\$WINDOW_START" '
+                                NR > 1 && \$4 >= ws && \$7 ~ /^SUCCESS/ { c++ }
                                 END { print c+0 }
-                            ' "$DORA_LOG")
+                            ' "${env.DORA_LOG}")
 
-                            DF_PER_DAY=$(awk -v c="$DEPLOY_COUNT" -v d="$DORA_WINDOW_DAYS" 'BEGIN { printf "%.4f", c/d }')
+                            DF_PER_DAY=\$(awk -v c="\$DEPLOY_COUNT" -v d="${env.DORA_WINDOW_DAYS}" 'BEGIN { printf "%.4f", c/d }')
 
-                            echo "$LT_SECONDS|$LT_MINUTES|$DEPLOY_COUNT|$DF_PER_DAY"
-                        '''
+                            echo "\$LT_DORA|\$LT_PIPE|\$LT_DORA_MIN|\$LT_PIPE_MIN|\$DEPLOY_COUNT|\$DF_PER_DAY"
+                        """
                     ).trim()
 
-                    def parts = result.split(/\|/)
-                    env.DORA_LT_SECONDS = parts[0]
-                    env.DORA_LT_MINUTES = parts[1]
-                    env.DORA_DF_COUNT = parts[2]
-                    env.DORA_DF_PER_DAY = parts[3]
+                    def p = result.split("\\|")
+
+                    env.LT_DORA_SEC = p[0]
+                    env.LT_PIPE_SEC = p[1]
+                    env.LT_DORA_MIN = p[2]
+                    env.LT_PIPE_MIN = p[3]
+                    env.DF_COUNT    = p[4]
+                    env.DF_RATE     = p[5]
 
                     writeFile file: 'dora-metrics.json', text: groovy.json.JsonOutput.prettyPrint(
                         groovy.json.JsonOutput.toJson([
-                            buildNumber: env.BUILD_NUMBER,
-                            commit: env.GIT_COMMIT_SHORT,
-                            leadTimeSeconds: env.DORA_LT_SECONDS,
-                            leadTimeMinutes: env.DORA_LT_MINUTES,
-                            deployCountLast30Days: env.DORA_DF_COUNT,
-                            deployFrequencyPerDay: env.DORA_DF_PER_DAY,
-                            semgrepStatus: env.SEMGREP_STATUS
+                            commit                : env.GIT_COMMIT_SHORT,
+                            leadTimeDoraSeconds   : env.LT_DORA_SEC,
+                            leadTimePipelineSec   : env.LT_PIPE_SEC,
+                            deployCount30Days     : env.DF_COUNT,
+                            deployFrequencyPerDay : env.DF_RATE,
+                            semgrep               : env.SEMGREP_STATUS
                         ])
                     )
 
                     archiveArtifacts artifacts: 'dora-metrics.json', fingerprint: true
-                    currentBuild.description = "LT=${env.DORA_LT_MINUTES}m | DF30=${env.DORA_DF_COUNT} | Semgrep=${env.SEMGREP_STATUS}"
+
+                    currentBuild.description = "LT=${env.LT_DORA_MIN}m | DF=${env.DF_COUNT} | SG=${env.SEMGREP_STATUS}"
                 }
             }
         }
@@ -178,10 +199,10 @@ pipeline {
             echo "=============================="
             echo "PIPELINE SUCCESS"
             echo "=============================="
-            echo "DORA FINAL RESULT:"
-            echo "Lead Time (LT): ${env.DORA_LT_SECONDS} detik (${env.DORA_LT_MINUTES} menit)"
-            echo "Deployment Frequency (DF): ${env.DORA_DF_COUNT} deploy dalam ${env.DORA_WINDOW_DAYS} hari"
-            echo "DF Rate: ${env.DORA_DF_PER_DAY} deploy/hari"
+
+            echo "DORA (VALID): ${env.LT_DORA_SEC} detik (${env.LT_DORA_MIN} menit)"
+            echo "PIPELINE (STOPWATCH): ${env.LT_PIPE_SEC} detik (${env.LT_PIPE_MIN} menit)"
+            echo "DF: ${env.DF_COUNT} deploy / ${env.DORA_WINDOW_DAYS} hari (${env.DF_RATE}/hari)"
             echo "Semgrep: ${env.SEMGREP_STATUS}"
         }
 
