@@ -27,8 +27,8 @@ pipeline {
                     env.GIT_COMMIT_SHORT = sh(script: "git rev-parse --short HEAD", returnStdout: true).trim()
                     env.GIT_COMMIT_EPOCH = sh(script: "git log -1 --format=%ct", returnStdout: true).trim()
 
-                    // waktu pipeline mulai (buat stopwatch LT)
-                    env.PIPELINE_START_EPOCH = (System.currentTimeMillis() / 1000).toString()
+                    // FIX: pakai integer dari shell (anti error desimal)
+                    env.PIPELINE_START_EPOCH = sh(script: "date +%s", returnStdout: true).trim()
 
                     echo "Commit: ${env.GIT_COMMIT_SHORT}"
                     echo "Commit epoch: ${env.GIT_COMMIT_EPOCH}"
@@ -119,17 +119,17 @@ pipeline {
                             DEPLOY_EPOCH=\$(date +%s)
 
                             # =========================
-                            # 1. DORA Lead Time (VALID)
+                            # LT DORA (Commit → Deploy)
                             # =========================
                             LT_DORA=\$((DEPLOY_EPOCH - ${env.GIT_COMMIT_EPOCH}))
 
                             # =========================
-                            # 2. Pipeline Lead Time (STOPWATCH)
+                            # LT PIPELINE (Stopwatch)
                             # =========================
-                            LT_PIPELINE=\$((DEPLOY_EPOCH - ${env.PIPELINE_START_EPOCH}))
+                            LT_PIPE=\$((DEPLOY_EPOCH - ${env.PIPELINE_START_EPOCH}))
 
                             LT_DORA_MIN=\$(awk -v s="\$LT_DORA" 'BEGIN { printf "%.2f", s/60 }')
-                            LT_PIPE_MIN=\$(awk -v s="\$LT_PIPELINE" 'BEGIN { printf "%.2f", s/60 }')
+                            LT_PIPE_MIN=\$(awk -v s="\$LT_PIPE" 'BEGIN { printf "%.2f", s/60 }')
 
                             WINDOW_START=\$(date -d "${env.DORA_WINDOW_DAYS} days ago" +%s)
 
@@ -140,9 +140,9 @@ pipeline {
                             fi
 
                             if [ "${env.SEMGREP_STATUS}" = "OK" ]; then
-                                DEPLOY_STATUS="SUCCESS"
+                                STATUS="SUCCESS"
                             else
-                                DEPLOY_STATUS="SUCCESS_WITH_ISSUES"
+                                STATUS="SUCCESS_WITH_ISSUES"
                             fi
 
                             printf '%s,%s,%s,%s,%s,%s,%s,%s\\n' \\
@@ -151,8 +151,8 @@ pipeline {
                                 "${env.GIT_COMMIT_EPOCH}" \\
                                 "\$DEPLOY_EPOCH" \\
                                 "\$LT_DORA" \\
-                                "\$LT_PIPELINE" \\
-                                "\$DEPLOY_STATUS" \\
+                                "\$LT_PIPE" \\
+                                "\$STATUS" \\
                                 "${env.SEMGREP_STATUS}" >> "${env.DORA_LOG}"
 
                             DEPLOY_COUNT=\$(awk -F',' -v ws="\$WINDOW_START" '
@@ -162,7 +162,7 @@ pipeline {
 
                             DF_PER_DAY=\$(awk -v c="\$DEPLOY_COUNT" -v d="${env.DORA_WINDOW_DAYS}" 'BEGIN { printf "%.4f", c/d }')
 
-                            echo "\$LT_DORA|\$LT_PIPELINE|\$LT_DORA_MIN|\$LT_PIPE_MIN|\$DEPLOY_COUNT|\$DF_PER_DAY"
+                            echo "\$LT_DORA|\$LT_PIPE|\$LT_DORA_MIN|\$LT_PIPE_MIN|\$DEPLOY_COUNT|\$DF_PER_DAY"
                         """
                     ).trim()
 
@@ -208,6 +208,10 @@ pipeline {
 
         failure {
             echo "PIPELINE FAILED"
+        }
+
+        always {
+            echo "Build status: ${currentBuild.currentResult}"
         }
     }
 }
